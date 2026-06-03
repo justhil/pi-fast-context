@@ -901,64 +901,6 @@ Configuration is handled by /fast-context-config. API key resolution order: FAST
 		},
 	});
 
-	pi.registerCommand("fast-context-test", {
-		description: "Test key discovery and optionally run a lightweight Fast Context search. Usage: /fast-context-test [project path]",
-		handler: async (args, ctx) => {
-			const config = loadConfig(ctx.cwd);
-			const issues = validateConfig(config);
-			if (issues.length > 0) {
-				ctx.ui.notify(`fast-context configuration error:\n- ${issues.join("\n- ")}`, "warning");
-				return;
-			}
-
-			const keyInfo = await resolveApiKey(config);
-			if (!keyInfo.apiKey) {
-				ctx.ui.notify(`Windsurf API key not found.\nsource: ${keyInfo.source}\ndbPath: ${keyInfo.dbPath || config.dbPath || "auto"}${keyInfo.error ? `\nerror: ${keyInfo.error}` : ""}${keyInfo.hint ? `\nhint: ${keyInfo.hint}` : ""}`, "warning");
-				return;
-			}
-
-			const projectRoot = normalizeProjectPath(args.trim(), ctx.cwd);
-			const ok = await ctx.ui.confirm("运行轻量 Fast Context 搜索？", `Key 已找到：${maskSecret(keyInfo.apiKey)} (${keyInfo.source})\n\n是否对下面项目运行一个轻量测试搜索？\n${projectRoot}`);
-			if (!ok) {
-				ctx.ui.notify(`fast-context key ok\nsource: ${keyInfo.source}\nkey: ${maskSecret(keyInfo.apiKey)}\ndbPath: ${keyInfo.dbPath || config.dbPath || "auto"}`, "info");
-				return;
-			}
-
-			const status = beginStatus(ctx, "fast-context: testing");
-			let statusFinished = false;
-			try {
-				const core = await loadCore();
-				const output = await core.searchWithContent({
-					query: "Find package metadata and extension entry points. Keywords: package.json registerTool registerCommand",
-					projectRoot,
-					apiKey: keyInfo.apiKey,
-					maxTurns: 1,
-					maxCommands: Math.min(config.maxCommands, 4),
-					maxResults: Math.min(config.maxResults, 5),
-					treeDepth: config.treeDepth,
-					timeoutMs: config.timeoutMs,
-					excludePaths: config.excludePaths,
-					repoMapMode: config.repoMapMode,
-					bootstrapEnabled: false,
-					bootstrapTreeDepth: config.bootstrapTreeDepth,
-					hotspotTopK: config.hotspotTopK,
-					hotspotTreeDepth: config.hotspotTreeDepth,
-					hotspotMaxBytes: config.hotspotMaxBytes,
-					bootstrapMaxTurns: config.bootstrapMaxTurns,
-					bootstrapMaxCommands: config.bootstrapMaxCommands,
-					onProgress: (message) => status.progress(message),
-				});
-				status.finish("fast-context: test done");
-				statusFinished = true;
-				ctx.ui.notify(`fast-context test complete\nsource: ${keyInfo.source}\nprojectRoot: ${projectRoot}\n\n${truncateToolText(output, 4000)}`, "info");
-			} catch (error) {
-				ctx.ui.notify(`fast-context test failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
-			} finally {
-				if (!statusFinished) status.clear();
-			}
-		},
-	});
-
 	pi.on("session_start", (_event, ctx) => {
 		const config = loadConfig(ctx.cwd);
 		const issues = validateConfig(config);
