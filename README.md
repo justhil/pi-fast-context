@@ -6,11 +6,13 @@
 
 ## 能力
 
-- 注册 Pi 原生工具：`fast_context_search`
-- 通过 `/fast-context-config` 交互式配置 Windsurf API Key 和搜索默认参数
-- 通过 `/fast-context-status` 查看 key 来源、masked key、配置文件和搜索参数
-- 通过 `/fast-context-test` 手动测试 key，并可运行轻量搜索
-- Key 解析优先级：
+- 注册一个 LLM 原生工具：`fast_context_search`
+- 注册人工命令：`/fast-context-config`、`/fast-context-status`、`/fast-context-test`
+- 支持 TUI 配置 Windsurf API Key 和搜索默认参数
+- 支持从 Windsurf 本地 `state.vscdb` 自动提取 API Key
+- 支持 Pi tool rendering 和搜索进度更新
+
+Key 解析优先级：
 
 ```text
 FAST_CONTEXT_API_KEY / WINDSURF_API_KEY 环境变量
@@ -19,28 +21,80 @@ FAST_CONTEXT_API_KEY / WINDSURF_API_KEY 环境变量
   > Windsurf state.vscdb 自动提取
 ```
 
-## 安装 / 本地加载
+## 安装
+
+### 方式一：从 GitHub 安装（推荐）
 
 ```bash
-npm install
+pi install git:github.com/justhil/pi-fast-context
+```
+
+也可以使用 HTTPS URL：
+
+```bash
+pi install https://github.com/justhil/pi-fast-context
+```
+
+安装后重启 Pi，或在当前 Pi 会话里执行 `/reload`。
+
+### 方式二：项目级安装
+
+如果只想在当前项目启用：
+
+```bash
+pi install -l git:github.com/justhil/pi-fast-context
+```
+
+`-l` 会写入项目配置 `.pi/settings.json`。如果要和团队共享这个安装项，需要把对应 `.pi/settings.json` 纳入你的项目仓库；不要提交 `.pi/fast-context.json` 这类包含密钥的配置。
+
+### 方式三：临时试用，不写入配置
+
+```bash
+pi -e git:github.com/justhil/pi-fast-context
+```
+
+本地开发目录里也可以：
+
+```bash
 pi -e .
 ```
 
-或作为 Pi package 安装：
+### 方式四：本地 clone 后安装
 
 ```bash
-pi install ./path/to/pi-fast-context
+git clone https://github.com/justhil/pi-fast-context.git
+cd pi-fast-context
+npm install
+npm run check
+pi install .
 ```
+
+### npm 安装
+
+当前版本尚未发布到 npm。发布后可使用：
+
+```bash
+pi install npm:pi-fast-context
+```
+
+## 前置条件
+
+- Node.js 18+
+- 已安装 Pi CLI
+- 至少满足下面之一：
+  - 设置 `FAST_CONTEXT_API_KEY` 或 `WINDSURF_API_KEY`
+  - 已安装 Windsurf 桌面端并登录过一次，让本地 `state.vscdb` 中存在 API Key
+  - 通过 `/fast-context-config` 手动写入 API Key
 
 ## 快速开始
 
-1. 加载 extension 后运行：
+1. 查看当前状态：
 
 ```text
 /fast-context-status
 ```
 
-2. 如果没有自动发现 Windsurf key，运行：
+2. 如果没有自动发现 Windsurf key，运行配置向导：
 
 ```text
 /fast-context-config
@@ -57,11 +111,58 @@ pi install ./path/to/pi-fast-context
 /fast-context-test
 ```
 
-4. Agent 在需要语义发现时调用：
+4. Agent 在需要语义发现时会调用：
 
 ```text
 fast_context_search
 ```
+
+## 配置方式
+
+### TUI 配置
+
+```text
+/fast-context-config
+```
+
+常用子命令：
+
+```text
+/fast-context-config project
+/fast-context-config global
+/fast-context-config clear
+```
+
+### 环境变量配置
+
+PowerShell：
+
+```powershell
+$env:FAST_CONTEXT_API_KEY="your-windsurf-api-key"
+pi
+```
+
+bash / zsh：
+
+```bash
+export FAST_CONTEXT_API_KEY="your-windsurf-api-key"
+pi
+```
+
+也兼容：
+
+```bash
+export WINDSURF_API_KEY="your-windsurf-api-key"
+```
+
+### 配置文件位置
+
+| Scope | Path |
+|---|---|
+| 全局 | `~/.pi/agent/fast-context.json` |
+| 项目 | `.pi/fast-context.json` |
+
+配置文件会以 `0600` 权限写入。不要把包含 API Key 的 `.pi/fast-context.json` 提交到 Git。
 
 ## 工具
 
@@ -125,6 +226,7 @@ fast_context_search
 ## 开发验证
 
 ```bash
+npm install
 npm run check
 ```
 
@@ -136,10 +238,21 @@ node --input-type=module -e "import ext from './.tmp-build/index.js'; const c={t
 rm -rf .tmp-build
 ```
 
+打包预览：
+
+```bash
+npm pack --dry-run --json
+```
+
+## 安全说明
+
+- Pi packages 会以本机权限执行 extension 代码，安装第三方 package 前应审查源码。
+- `fast_context_search` 不单独暴露 key 检查工具给 LLM；key 只通过人工命令配置和 masked 展示。
+- 不要提交 `.pi/fast-context.json`、`.env`、Windsurf API Key 或任何包含 secret 的日志。
+
 ## 注意
 
 - 核心协议来自 Windsurf Devstral 逆向实现，Windsurf 改协议后可能失效。
-- Key 默认不会作为 LLM 工具单独暴露；只通过配置命令和 status 面板 masked 展示。
 - vendored core 仍保留 TLS fallback 行为：网络/TLS 失败时可能设置 `NODE_TLS_REJECT_UNAUTHORIZED=0`。
 - 当前版本主要把 Pi `signal` 用于工具边界，vendored core 内部 fetch 尚未完整接入外部取消信号。
 
