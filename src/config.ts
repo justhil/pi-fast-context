@@ -297,15 +297,15 @@ export function validateConfig(config: FastContextConfig): string[] {
 
 async function extractWindsurfDbKey(dbPath?: string): Promise<ResolvedApiKey> {
 	try {
-		const core = await import(pathToFileURL(path.join(import.meta.dirname, "lib", "core.mjs")).href) as {
-			extractKeyInfo: (dbPath?: string) => Promise<ExtractKeyResult>;
+		const keyModule = await import(pathToFileURL(path.join(import.meta.dirname, "lib", "extract-key.mjs")).href) as {
+			extractKey: (dbPath?: string) => Promise<ExtractKeyResult>;
 		};
-		const result = await core.extractKeyInfo(dbPath);
+		const result = await keyModule.extractKey(dbPath);
 		if (result.api_key) {
 			return { apiKey: result.api_key, source: "windsurf-db", dbPath: result.db_path };
 		}
 		if (dbPath) {
-			const fallback = await core.extractKeyInfo();
+			const fallback = await keyModule.extractKey();
 			if (fallback.api_key) {
 				return { apiKey: fallback.api_key, source: "windsurf-db", dbPath: fallback.db_path };
 			}
