@@ -1,0 +1,47 @@
+{
+  "name": "pi-fast-context",
+  "version": "0.1.0",
+  "description": "Pi extension package that registers native Fast Context tools powered by Windsurf Devstral semantic code search.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "fast-context",
+    "windsurf",
+    "devstral",
+    "semantic-search",
+    "codebase-search"
+  ],
+  "license": "MIT",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check:lib": "node --check src/lib/core.mjs && node --check src/lib/executor.mjs && node --check src/lib/extract-key.mjs && node --check src/lib/protobuf.mjs && node --check src/lib/directory-scorer.mjs",
+    "check": "npm run typecheck && npm run check:lib"
+  },
+  "dependencies": {
+    "@vscode/ripgrep": "^1.15.9",
+    "sql.js": "^1.14.0",
+    "tree-node-cli": "^1.6.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}

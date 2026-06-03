@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+
+# build / generated
+.tmp-build/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# local reference repositories
+参考/
+
+# npm artifacts
+*.tgz
+.npm/
+
+# pi local state / secrets
+.pi/
+.env
+.env.*
+!.env.example
+
+# fast-context local config / caches
+fast-context.json
+.ace-tool/
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
