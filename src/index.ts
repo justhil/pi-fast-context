@@ -287,6 +287,8 @@ type ConfigSelectItem = {
 	details?: string;
 };
 
+const CUSTOM_CANCEL = "__fast_context_custom_cancel__";
+
 const BASIC_CONFIG_FIELDS: ConfigField[] = [
 	{ key: "apiKey", env: "FAST_CONTEXT_API_KEY / WINDSURF_API_KEY", label: "Windsurf API Key", kind: "secret", description: "手动保存 Windsurf API Key。推荐保存到全局配置；项目配置保存 key 需要额外确认。" },
 	{ key: "dbPath", env: "FAST_CONTEXT_DB_PATH", label: "Windsurf state.vscdb 路径", kind: "string", description: "自定义 Windsurf 本地 state.vscdb 路径。留空时按系统默认位置自动查找。", defaultValue: "auto" },
@@ -331,13 +333,17 @@ function fixedDetailLines(value: string, width: number, lineCount = 5): string[]
 	return lines;
 }
 
-async function selectConfigItem(ctx: UiContext, title: string, items: ConfigSelectItem[], maxVisible = 8): Promise<string | undefined> {
-	if (!ctx.ui.custom) {
-		const labels = items.map((item) => item.label);
-		const choice = await ctx.ui.select(title, labels);
-		return items.find((item) => item.label === choice)?.value;
+async function basicSelectConfigItem(ctx: UiContext, title: string, items: ConfigSelectItem[]): Promise<string | undefined> {
+	const labels = items.map((item) => item.label);
+	const choice = await ctx.ui.select(title, labels);
+	return items.find((item) => item.label === choice)?.value;
+}
+
+async function selectConfigItem(ctx: UiContext, title: string, items: ConfigSelectItem[], maxVisible = 8, options: { custom?: boolean } = {}): Promise<string | undefined> {
+	if (options.custom === false || !ctx.ui.custom) {
+		return basicSelectConfigItem(ctx, title, items);
 	}
-	return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+	const customChoice = await ctx.ui.custom<string>((tui, theme, _keybindings, done) => {
 		const listItems: SelectItem[] = items.map((item) => ({ value: item.value, label: item.label, description: item.description }));
 		const list = new SelectList(listItems, Math.min(maxVisible, Math.max(1, listItems.length)), selectTheme(theme), {
 			minPrimaryColumnWidth: 28,
@@ -345,7 +351,7 @@ async function selectConfigItem(ctx: UiContext, title: string, items: ConfigSele
 		});
 		const detailByValue = new Map(items.map((item) => [item.value, item.details || item.description || ""]));
 		list.onSelect = (item) => done(item.value);
-		list.onCancel = () => done(undefined);
+		list.onCancel = () => done(CUSTOM_CANCEL);
 		return {
 			render(width: number): string[] {
 				const selected = list.getSelectedItem();
@@ -369,6 +375,8 @@ async function selectConfigItem(ctx: UiContext, title: string, items: ConfigSele
 			},
 		};
 	}, { overlay: true });
+	if (customChoice === CUSTOM_CANCEL) return undefined;
+	return customChoice ?? basicSelectConfigItem(ctx, title, items);
 }
 
 function formatStoredValue(field: ConfigField, config: StoredFastContextConfig): string {
@@ -446,7 +454,7 @@ async function chooseImportScope(ctx: UiContext): Promise<FastContextConfigScope
 			details: "只有当前项目必须使用独立 key 时才选择。请确认 .pi/ 已被 .gitignore 忽略；Fast Context 内置排除和读取保护会避免读取 .pi/。",
 		},
 		{ value: "cancel", label: "取消", description: "不保存 key。", details: "自动发现结果只会留在本次命令内，不写入配置文件。" },
-	]);
+	], 8, { custom: false });
 	if (!choice || choice === "cancel") return undefined;
 	return choice === "project" ? "project" : "global";
 }
