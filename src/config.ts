@@ -304,6 +304,16 @@ async function extractWindsurfDbKey(dbPath?: string): Promise<ResolvedApiKey> {
 		if (result.api_key) {
 			return { apiKey: result.api_key, source: "windsurf-db", dbPath: result.db_path };
 		}
+		if (dbPath) {
+			const fallback = await core.extractKeyInfo();
+			if (fallback.api_key) {
+				return { apiKey: fallback.api_key, source: "windsurf-db", dbPath: fallback.db_path };
+			}
+			const fallbackInfo = fallback.error && fallback.db_path !== result.db_path
+				? ` Default Windsurf DB fallback (${fallback.db_path}) also failed: ${fallback.error}`
+				: "";
+			return { source: "none", dbPath: result.db_path, error: `${result.error ?? "Configured Windsurf database did not contain an API key."}${fallbackInfo}`, hint: result.hint ?? fallback.hint };
+		}
 		return { source: "none", dbPath: result.db_path, error: result.error, hint: result.hint };
 	} catch (error) {
 		return { source: "none", dbPath, error: error instanceof Error ? error.message : String(error) };
