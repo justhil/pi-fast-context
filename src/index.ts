@@ -1,14 +1,17 @@
 import type { BuildSystemPromptOptions, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { SelectList, Text, truncateToWidth, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import {
 	deleteStoredConfig,
+	discoverWindsurfDbKey,
 	formatTimeout,
 	getConfigFilePath,
+	hasEnvApiKey,
 	loadConfig,
 	maskSecret,
+	persistApiKey,
 	readStoredConfig,
 	resolveApiKey,
 	type FastContextConfig,
@@ -72,6 +75,11 @@ type CoreModule = {
 	}) => Promise<string>;
 };
 
+type ConfigTheme = {
+	fg: (color: "accent" | "muted" | "dim" | "warning", text: string) => string;
+	bold: (text: string) => string;
+};
+
 type UiContext = {
 	cwd: string;
 	hasUI?: boolean;
@@ -81,6 +89,10 @@ type UiContext = {
 		confirm: (title: string, message: string) => Promise<boolean>;
 		notify: (message: string, level?: "info" | "warning" | "error") => void;
 		setStatus: (key: string, value: string | undefined) => void;
+		custom?: <T>(
+			factory: (tui: TUI, theme: ConfigTheme, keybindings: unknown, done: (result: T) => void) => Component | Promise<Component>,
+			options?: { overlay?: boolean },
+		) => Promise<T>;
 	};
 };
 
@@ -180,73 +192,330 @@ function envOverrideSummary(): string {
 	return count ? `${count} override(s)` : "none";
 }
 
+function padLabel(label: string, width = 13): string {
+	return label.padEnd(width, " ");
+}
+
+function kv(label: string, value: string | number | boolean | undefined): string {
+	return `${padLabel(label)} ${value === undefined || value === "" ? "-" : value}`;
+}
+
+function section(title: string, rows: string[]): string {
+	return [`─ ${title}`, ...rows.map((row) => `  ${row}`)].join("\n");
+}
+
+function configCount(scope: FastContextConfigScope, cwd: string): string {
+	const count = Object.keys(readStoredConfig(scope, cwd)).length;
+	return count ? `${count} setting(s)` : "not set";
+}
+
+function updateConfigStatus(ctx: UiContext): void {
+	const config = loadConfig(ctx.cwd);
+	ctx.ui.setStatus("fast-context", validateConfig(config).length > 0 ? "fast-context: invalid config" : undefined);
+}
+
+function nextActionText(issues: string[], keyInfo: Awaited<ReturnType<typeof resolveApiKey>>): string {
+	if (issues.length) return "fix config with /fast-context-config";
+	if (!keyInfo.apiKey) return "run /fast-context-config import, set env key, or log in to Windsurf";
+	if (keyInfo.source === "windsurf-db") return "ready; run /fast-context-import-key to persist discovered key";
+	return "ready; use fast_context_search";
+}
+
 function statusPanel(cwd: string, projectRoot: string, config: FastContextConfig, keyInfo: Awaited<ReturnType<typeof resolveApiKey>>): string {
 	const issues = validateConfig(config);
-	const ready = issues.length === 0 && Boolean(keyInfo.apiKey);
-	const lines = [
+	return [
 		"fast-context status",
 		"",
-		"─ health",
-		`  config        ${issues.length ? "invalid" : "ok"}`,
-		`  key           ${keyInfo.apiKey ? "found" : "missing"}`,
-		`  keySource     ${keyInfo.source}`,
-		`  next          ${ready ? "ready; use fast_context_search" : "run /fast-context-config or log in to Windsurf"}`,
+		section("health", [
+			kv("config", issues.length ? "invalid" : "ok"),
+			kv("key", keyInfo.apiKey ? "found" : "missing"),
+			kv("next", nextActionText(issues, keyInfo)),
+		]),
 		"",
-		"─ key",
-		`  masked        ${maskSecret(keyInfo.apiKey)}`,
-		`  dbPath        ${keyInfo.dbPath || config.dbPath || "auto"}`,
-		...(keyInfo.error ? [`  error         ${keyInfo.error}`] : []),
-		...(keyInfo.hint ? [`  hint          ${keyInfo.hint}`] : []),
+		section("key", [
+			kv("source", keyInfo.source),
+			kv("masked", maskSecret(keyInfo.apiKey)),
+			kv("dbPath", keyInfo.dbPath || config.dbPath || "auto"),
+			...(keyInfo.error ? [kv("error", keyInfo.error)] : []),
+			...(keyInfo.hint ? [kv("hint", keyInfo.hint)] : []),
+		]),
 		"",
-		"─ search defaults",
-		`  treeDepth     ${config.treeDepth}`,
-		`  maxTurns      ${config.maxTurns}`,
-		`  maxCommands   ${config.maxCommands}`,
-		`  maxResults    ${config.maxResults}`,
-		`  timeout       ${formatTimeout(config.timeoutMs)}`,
-		`  repoMapMode   ${config.repoMapMode}`,
-		`  bootstrap     ${config.bootstrapEnabled ? "on" : "off"}`,
-		`  excludes      ${config.excludePaths.length ? config.excludePaths.join(", ") : "none"}`,
+		section("config", [
+			kv("project", configCount("project", cwd)),
+			kv("global", configCount("global", cwd)),
+			kv("env", envOverrideSummary()),
+			kv("envKey", hasEnvApiKey() ? "active" : "not set"),
+		]),
 		"",
-		"─ config files",
-		`  project       ${getConfigFilePath("project", cwd)}`,
-		`  global        ${getConfigFilePath("global", cwd)}`,
-		`  env           ${envOverrideSummary()}`,
+		section("search defaults", [
+			kv("treeDepth", config.treeDepth),
+			kv("maxTurns", config.maxTurns),
+			kv("maxCommands", config.maxCommands),
+			kv("maxResults", config.maxResults),
+			kv("timeout", formatTimeout(config.timeoutMs)),
+			kv("repoMapMode", config.repoMapMode),
+			kv("bootstrap", config.bootstrapEnabled ? "on" : "off"),
+			kv("excludes", config.excludePaths.length ? config.excludePaths.join(", ") : "none"),
+		]),
 		"",
-		"─ paths",
-		`  projectRoot   ${projectRoot}`,
-		...(issues.length ? ["", "─ issues", ...issues.map((issue) => `  ! ${issue}`)] : []),
-	];
-	return lines.join("\n");
+		section("paths", [
+			kv("projectRoot", projectRoot),
+			kv("projectCfg", getConfigFilePath("project", cwd)),
+			kv("globalCfg", getConfigFilePath("global", cwd)),
+		]),
+		...(issues.length ? ["", section("issues", issues.map((issue) => `! ${issue}`))] : []),
+	].join("\n");
+}
+
+type ConfigFieldKind = "string" | "secret" | "number" | "boolean" | "list" | "repoMapMode";
+
+type ConfigField = {
+	key: keyof StoredFastContextConfig;
+	env: string;
+	label: string;
+	kind: ConfigFieldKind;
+	description: string;
+	defaultValue?: string | number | boolean;
+	min?: number;
+	max?: number;
+};
+
+type ConfigSelectItem = {
+	value: string;
+	label: string;
+	description?: string;
+	details?: string;
+};
+
+const BASIC_CONFIG_FIELDS: ConfigField[] = [
+	{ key: "apiKey", env: "FAST_CONTEXT_API_KEY / WINDSURF_API_KEY", label: "Windsurf API Key", kind: "secret", description: "手动保存 Windsurf API Key。推荐保存到全局配置；项目配置保存 key 需要额外确认。" },
+	{ key: "dbPath", env: "FAST_CONTEXT_DB_PATH", label: "Windsurf state.vscdb 路径", kind: "string", description: "自定义 Windsurf 本地 state.vscdb 路径。留空时按系统默认位置自动查找。", defaultValue: "auto" },
+	{ key: "treeDepth", env: "FAST_CONTEXT_TREE_DEPTH", label: "Repo tree 深度", kind: "number", description: "传给 Fast Context 的仓库树深度。0 表示自动选择，通常最稳。", defaultValue: 0, min: 0, max: 6 },
+	{ key: "maxTurns", env: "FAST_CONTEXT_MAX_TURNS", label: "搜索轮数", kind: "number", description: "远程模型最多推理/搜索轮数。越高越全，但更慢。", defaultValue: 3, min: 1, max: 10 },
+	{ key: "maxCommands", env: "FAST_CONTEXT_MAX_COMMANDS", label: "每轮命令数", kind: "number", description: "每轮允许远程模型请求的本地只读命令数量。", defaultValue: 8, min: 1, max: 20 },
+	{ key: "maxResults", env: "FAST_CONTEXT_MAX_RESULTS", label: "返回文件数量", kind: "number", description: "最多返回多少个候选文件和行范围。", defaultValue: 10, min: 1, max: 50 },
+	{ key: "timeoutSecs", env: "FAST_CONTEXT_TIMEOUT_SECS", label: "请求超时秒数", kind: "number", description: "Windsurf 请求超时时间。大仓库或慢网络可调高。", defaultValue: 30, min: 1 },
+	{ key: "excludePaths", env: "FAST_CONTEXT_EXCLUDE_PATHS", label: "额外排除路径", kind: "list", description: "逗号分隔的额外排除路径。内置默认会排除 .pi、.env、常见 key/cert 文件。", defaultValue: "none" },
+	{ key: "repoMapMode", env: "FAST_CONTEXT_REPO_MAP_MODE", label: "Repo map 模式", kind: "repoMapMode", description: "classic 为传统树；bootstrap_hotspot 会先探索再重点展开热点目录，通常推荐。", defaultValue: "bootstrap_hotspot" },
+];
+
+const ADVANCED_CONFIG_FIELDS: ConfigField[] = [
+	{ key: "bootstrapEnabled", env: "FAST_CONTEXT_BOOTSTRAP_ENABLED", label: "启用 bootstrap", kind: "boolean", description: "先跑轻量探索来提取关键词和热点目录。", defaultValue: true },
+	{ key: "bootstrapTreeDepth", env: "FAST_CONTEXT_BOOTSTRAP_TREE_DEPTH", label: "bootstrap tree depth", kind: "number", description: "bootstrap 阶段仓库树深度。", defaultValue: 1, min: 1, max: 3 },
+	{ key: "hotspotTopK", env: "FAST_CONTEXT_HOTSPOT_TOP_K", label: "hotspot 目录数", kind: "number", description: "重点展开多少个热点目录。", defaultValue: 4, min: 1, max: 8 },
+	{ key: "hotspotTreeDepth", env: "FAST_CONTEXT_HOTSPOT_TREE_DEPTH", label: "hotspot tree depth", kind: "number", description: "热点目录展开深度。", defaultValue: 2, min: 1, max: 4 },
+	{ key: "hotspotMaxBytes", env: "FAST_CONTEXT_HOTSPOT_MAX_BYTES", label: "hotspot 字节预算", kind: "number", description: "优化 repo map 的字节预算。", defaultValue: 120 * 1024, min: 16384 },
+	{ key: "bootstrapMaxTurns", env: "FAST_CONTEXT_BOOTSTRAP_MAX_TURNS", label: "bootstrap 最大轮数", kind: "number", description: "bootstrap 探索阶段最多轮数。", defaultValue: 2, min: 1, max: 5 },
+	{ key: "bootstrapMaxCommands", env: "FAST_CONTEXT_BOOTSTRAP_MAX_COMMANDS", label: "bootstrap 每轮命令数", kind: "number", description: "bootstrap 阶段每轮最多命令数。", defaultValue: 6, min: 1, max: 12 },
+];
+
+function selectTheme(theme: ConfigTheme): SelectListTheme {
+	return {
+		selectedPrefix: (text) => theme.fg("accent", text),
+		selectedText: (text) => theme.fg("accent", text),
+		description: (text) => theme.fg("muted", text),
+		scrollInfo: (text) => theme.fg("dim", text),
+		noMatch: (text) => theme.fg("warning", text),
+	};
+}
+
+function fixedDetailLines(value: string, width: number, lineCount = 5): string[] {
+	const maxWidth = Math.max(20, width - 4);
+	const lines = value
+		.split(/\r?\n/)
+		.map((line) => line.replace(/\s+/g, " ").trim())
+		.filter(Boolean)
+		.slice(0, lineCount)
+		.map((line) => truncateToWidth(line, maxWidth, "…"));
+	while (lines.length < lineCount) lines.push("");
+	return lines;
+}
+
+async function selectConfigItem(ctx: UiContext, title: string, items: ConfigSelectItem[], maxVisible = 8): Promise<string | undefined> {
+	if (!ctx.ui.custom) {
+		const labels = items.map((item) => item.label);
+		const choice = await ctx.ui.select(title, labels);
+		return items.find((item) => item.label === choice)?.value;
+	}
+	return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+		const listItems: SelectItem[] = items.map((item) => ({ value: item.value, label: item.label, description: item.description }));
+		const list = new SelectList(listItems, Math.min(maxVisible, Math.max(1, listItems.length)), selectTheme(theme), {
+			minPrimaryColumnWidth: 28,
+			maxPrimaryColumnWidth: 72,
+		});
+		const detailByValue = new Map(items.map((item) => [item.value, item.details || item.description || ""]));
+		list.onSelect = (item) => done(item.value);
+		list.onCancel = () => done(undefined);
+		return {
+			render(width: number): string[] {
+				const selected = list.getSelectedItem();
+				const details = selected ? detailByValue.get(selected.value) ?? "" : "";
+				return [
+					theme.fg("accent", theme.bold(title)),
+					"",
+					...fixedDetailLines(details, width).map((line) => `  ${line ? theme.fg("muted", line) : ""}`),
+					"",
+					...list.render(width),
+					"",
+					theme.fg("dim", truncateToWidth("↑↓ 切换 · Enter 选择/编辑 · Esc 返回", width, "")),
+				];
+			},
+			invalidate() {
+				list.invalidate();
+			},
+			handleInput(data: string) {
+				list.handleInput(data);
+				tui.requestRender();
+			},
+		};
+	}, { overlay: true });
+}
+
+function formatStoredValue(field: ConfigField, config: StoredFastContextConfig): string {
+	const value = config[field.key];
+	if (value === undefined || value === "") return field.defaultValue === undefined ? "未设置" : `默认值：${field.defaultValue}`;
+	if (field.kind === "secret") return maskSecret(String(value));
+	if (Array.isArray(value)) return value.length ? value.join(", ") : "none";
+	return String(value);
+}
+
+function fieldChoice(field: ConfigField, config: StoredFastContextConfig): ConfigSelectItem {
+	return {
+		value: String(field.key),
+		label: `${field.env} (${field.label}) = ${formatStoredValue(field, config)}`,
+		description: field.description,
+		details: [
+			field.description,
+			`环境变量：${field.env}`,
+			`配置字段：${String(field.key)}`,
+			`当前值：${formatStoredValue(field, config)} · 默认：${field.defaultValue === undefined ? "无" : field.defaultValue}`,
+			"优先级：环境变量 > 项目 > 全局 > Windsurf DB 自动发现 > 默认",
+		].join("\n"),
+	};
 }
 
 async function chooseScope(ctx: UiContext, args: string): Promise<FastContextConfigScope | undefined> {
 	const direct = parseScopeArg(args);
 	if (direct) return direct;
-	const choice = await ctx.ui.select("fast-context 配置：选择要编辑的位置", [
-		"全局配置 (~/.pi/agent/fast-context.json)",
-		"项目配置 (.pi/fast-context.json)",
-		"清除配置",
-		"退出",
+	const choice = await selectConfigItem(ctx, "fast-context 配置", [
+		{
+			value: "import-key",
+			label: "自动导入 Windsurf API Key（推荐）",
+			description: "从 Windsurf state.vscdb 读取 key，默认保存到全局配置。",
+			details: "只在人工命令中执行，不会暴露给 LLM。默认保存到 ~/.pi/agent/fast-context.json；项目保存需要额外确认。",
+		},
+		{
+			value: "global",
+			label: "编辑全局配置 (~/.pi/agent/fast-context.json)",
+			description: "默认作用于所有项目，可被项目配置和环境变量覆盖。",
+			details: `编辑：${getConfigFilePath("global", ctx.cwd)}\n推荐把 API Key 存在这里。优先级：环境变量 > 项目 > 全局 > Windsurf DB 自动发现。`,
+		},
+		{
+			value: "project",
+			label: "编辑项目配置 (.pi/fast-context.json)",
+			description: "只作用于当前项目，优先级高于全局配置。",
+			details: `编辑：${getConfigFilePath("project", ctx.cwd)}\n不要把包含 API Key 的项目配置提交到 Git；Fast Context 默认会排除 .pi/。`,
+		},
+		{ value: "clear", label: "清除配置", description: "删除项目或全局配置文件。", details: "删除前会二次确认。" },
+		{ value: "exit", label: "退出", description: "不修改任何配置。", details: "关闭配置向导。" },
 	]);
-	if (!choice || choice === "退出") return undefined;
-	if (choice.startsWith("全局")) return "global";
-	if (choice.startsWith("项目")) return "project";
-	await clearConfigFlow(ctx, args);
-	return undefined;
+	if (!choice || choice === "exit") return undefined;
+	if (choice === "import-key") {
+		await importWindsurfKeyFlow(ctx);
+		return undefined;
+	}
+	if (choice === "clear") {
+		await clearConfigFlow(ctx, args);
+		return undefined;
+	}
+	return choice === "global" ? "global" : "project";
+}
+
+async function chooseImportScope(ctx: UiContext): Promise<FastContextConfigScope | undefined> {
+	const choice = await selectConfigItem(ctx, "保存自动发现的 Windsurf API Key", [
+		{
+			value: "global",
+			label: "保存到全局配置（推荐）",
+			description: "写入 ~/.pi/agent/fast-context.json，适合跨项目复用。",
+			details: "推荐选择。全局配置不在当前项目仓库内，可被项目配置或环境变量覆盖。写入时会保留已有其他配置字段。",
+		},
+		{
+			value: "project",
+			label: "保存到项目配置（高级 / 有风险）",
+			description: "写入 .pi/fast-context.json，只作用于当前项目。",
+			details: "只有当前项目必须使用独立 key 时才选择。请确认 .pi/ 已被 .gitignore 忽略；Fast Context 内置排除和读取保护会避免读取 .pi/。",
+		},
+		{ value: "cancel", label: "取消", description: "不保存 key。", details: "自动发现结果只会留在本次命令内，不写入配置文件。" },
+	]);
+	if (!choice || choice === "cancel") return undefined;
+	return choice === "project" ? "project" : "global";
+}
+
+async function importWindsurfKeyFlow(ctx: UiContext): Promise<void> {
+	const config = loadConfig(ctx.cwd);
+	const discovered = await discoverWindsurfDbKey(config.dbPath);
+	if (!discovered.apiKey) {
+		ctx.ui.notify([
+			"未能从 Windsurf state.vscdb 自动获取 API Key。",
+			`dbPath: ${discovered.dbPath || config.dbPath || "auto"}`,
+			...(discovered.error ? [`error: ${discovered.error}`] : []),
+			...(discovered.hint ? [`hint: ${discovered.hint}`] : []),
+			"",
+			"可先登录 Windsurf 桌面端，或手动设置 FAST_CONTEXT_API_KEY / WINDSURF_API_KEY。",
+		].join("\n"), "warning");
+		return;
+	}
+
+	const scope = await chooseImportScope(ctx);
+	if (!scope) return;
+	const stored = readStoredConfig(scope, ctx.cwd);
+	if (scope === "project") {
+		const ok = await ctx.ui.confirm("确认保存到项目配置？", "项目配置会写入 .pi/fast-context.json。请确认 .pi/ 不会被提交到 Git；推荐优先保存到全局配置。是否继续？");
+		if (!ok) return;
+	}
+	if (stored.apiKey && stored.apiKey !== discovered.apiKey) {
+		const ok = await ctx.ui.confirm("覆盖已有 API Key？", `${scopeName(scope)}配置已有 key：${maskSecret(stored.apiKey)}\n新发现 key：${maskSecret(discovered.apiKey)}\n\n是否覆盖？`);
+		if (!ok) return;
+	}
+
+	const filePath = persistApiKey(scope, ctx.cwd, discovered.apiKey);
+	updateConfigStatus(ctx);
+	ctx.ui.notify([
+		"已保存 Windsurf API Key。",
+		`scope: ${scopeName(scope)}`,
+		`file: ${filePath}`,
+		`key: ${maskSecret(discovered.apiKey)}`,
+		`dbPath: ${discovered.dbPath || "auto"}`,
+		...(hasEnvApiKey() ? ["", "注意：当前环境变量中也设置了 API Key；本次运行仍会优先使用环境变量。"] : []),
+	].join("\n"), "info");
 }
 
 async function clearConfigFlow(ctx: UiContext, args: string): Promise<void> {
 	let scope = parseScopeArg(args);
 	if (!scope) {
-		const choice = await ctx.ui.select("要清除哪一份 fast-context 配置？", ["全局配置", "项目配置", "取消"]);
-		if (!choice || choice === "取消") return;
-		scope = choice.startsWith("全局") ? "global" : "project";
+		const choice = await selectConfigItem(ctx, "要清除哪一份 fast-context 配置？", [
+			{
+				value: "global",
+				label: "全局配置 (~/.pi/agent/fast-context.json)",
+				description: "删除全局配置文件。",
+				details: `将删除：${getConfigFilePath("global", ctx.cwd)}\n删除后会退回到项目配置、环境变量、Windsurf DB 自动发现或默认值。`,
+			},
+			{
+				value: "project",
+				label: "项目配置 (.pi/fast-context.json)",
+				description: "删除当前项目配置文件。",
+				details: `将删除：${getConfigFilePath("project", ctx.cwd)}\n删除后当前项目会使用全局配置、环境变量、Windsurf DB 自动发现或默认值。`,
+			},
+			{ value: "cancel", label: "取消", description: "不删除任何配置。", details: "返回上一级菜单。" },
+		]);
+		if (!choice || choice === "cancel") return;
+		scope = choice === "global" ? "global" : "project";
 	}
 	const filePath = getConfigFilePath(scope, ctx.cwd);
 	const ok = await ctx.ui.confirm("清除 fast-context 配置？", `删除 ${filePath}？`);
 	if (!ok) return;
 	deleteStoredConfig(scope, ctx.cwd);
+	updateConfigStatus(ctx);
 	ctx.ui.notify(`已删除 ${scopeName(scope)} fast-context 配置：\n${filePath}`, "info");
 }
 
@@ -266,11 +535,16 @@ async function editString(ctx: UiContext, scope: FastContextConfigScope, key: ke
 	if (value === undefined) return;
 	const trimmed = value.trim();
 	if (!trimmed) return;
+	if (key === "apiKey" && scope === "project" && trimmed !== "-") {
+		const ok = await ctx.ui.confirm("确认保存 API Key 到项目配置？", "项目配置会写入 .pi/fast-context.json。请确认 .pi/ 不会被提交到 Git；推荐优先保存到全局配置。是否继续？");
+		if (!ok) return;
+	}
 	const next = { ...stored };
 	if (trimmed === "-") delete next[key];
 	else (next as Record<string, unknown>)[key] = trimmed;
 	writeStoredConfig(scope, ctx.cwd, next);
-	ctx.ui.notify(`已保存 ${scopeName(scope)}配置。`, "info");
+	updateConfigStatus(ctx);
+	ctx.ui.notify(`已保存 ${scopeName(scope)}配置。${hasEnvApiKey() && key === "apiKey" ? "\n注意：当前环境变量 API Key 仍拥有最高优先级。" : ""}`, "info");
 }
 
 async function editNumber(ctx: UiContext, scope: FastContextConfigScope, key: keyof StoredFastContextConfig, title: string, min: number, max?: number): Promise<void> {
@@ -291,6 +565,7 @@ async function editNumber(ctx: UiContext, scope: FastContextConfigScope, key: ke
 		(next as Record<string, unknown>)[key] = parsed;
 	}
 	writeStoredConfig(scope, ctx.cwd, next);
+	updateConfigStatus(ctx);
 	ctx.ui.notify(`已保存 ${scopeName(scope)}配置。`, "info");
 }
 
@@ -302,6 +577,7 @@ async function editBoolean(ctx: UiContext, scope: FastContextConfigScope, key: k
 	if (choice.startsWith("清除")) delete next[key];
 	else (next as Record<string, unknown>)[key] = choice === "true";
 	writeStoredConfig(scope, ctx.cwd, next);
+	updateConfigStatus(ctx);
 	ctx.ui.notify(`已保存 ${scopeName(scope)}配置。`, "info");
 }
 
@@ -316,71 +592,85 @@ async function editExcludePaths(ctx: UiContext, scope: FastContextConfigScope): 
 	if (trimmed === "-") delete next.excludePaths;
 	else next.excludePaths = [...new Set(trimmed.split(",").map((item) => item.trim()).filter(Boolean))];
 	writeStoredConfig(scope, ctx.cwd, next);
+	updateConfigStatus(ctx);
 	ctx.ui.notify(`已保存 ${scopeName(scope)}配置。`, "info");
 }
 
 async function configureRepoMapMode(ctx: UiContext, scope: FastContextConfigScope): Promise<void> {
 	const stored = readStoredConfig(scope, ctx.cwd);
-	const choice = await ctx.ui.select("选择 repo map 模式", ["bootstrap_hotspot（推荐）", "classic", "清除 / 使用默认值", "取消"]);
-	if (!choice || choice === "取消") return;
+	const choice = await selectConfigItem(ctx, "选择 repo map 模式", [
+		{
+			value: "bootstrap_hotspot",
+			label: "bootstrap_hotspot（推荐）",
+			description: "先做轻量探索，再展开热点目录。",
+			details: "默认推荐。适合多数真实项目，能在大仓库中保留更多相关目录细节。",
+		},
+		{
+			value: "classic",
+			label: "classic",
+			description: "直接构建传统 repo tree。",
+			details: "更接近上游 fast-context-mcp 原始模式。项目较小或不需要 hotspot 优化时可用。",
+		},
+		{ value: "clear", label: "清除 / 使用默认值", description: "删除 repoMapMode 字段。", details: "清除后使用默认 bootstrap_hotspot，除非环境变量覆盖。" },
+		{ value: "cancel", label: "取消", description: "不修改。", details: "返回上一级菜单。" },
+	]);
+	if (!choice || choice === "cancel") return;
 	const next = { ...stored };
-	if (choice.startsWith("清除")) delete next.repoMapMode;
-	else next.repoMapMode = choice.startsWith("classic") ? "classic" : "bootstrap_hotspot";
+	if (choice === "clear") delete next.repoMapMode;
+	else next.repoMapMode = choice === "classic" ? "classic" : "bootstrap_hotspot";
 	writeStoredConfig(scope, ctx.cwd, next);
+	updateConfigStatus(ctx);
 	ctx.ui.notify(`已保存 ${scopeName(scope)}配置。`, "info");
+}
+
+async function editConfigField(ctx: UiContext, scope: FastContextConfigScope, field: ConfigField): Promise<void> {
+	if (field.kind === "secret") await editString(ctx, scope, field.key, `设置 ${field.label}`, true);
+	else if (field.kind === "string") await editString(ctx, scope, field.key, `设置 ${field.label}`);
+	else if (field.kind === "number") await editNumber(ctx, scope, field.key, `设置 ${field.label}`, field.min ?? 1, field.max);
+	else if (field.kind === "boolean") await editBoolean(ctx, scope, field.key, `设置 ${field.label}`);
+	else if (field.kind === "list") await editExcludePaths(ctx, scope);
+	else if (field.kind === "repoMapMode") await configureRepoMapMode(ctx, scope);
 }
 
 async function configureAdvanced(ctx: UiContext, scope: FastContextConfigScope): Promise<void> {
 	while (true) {
 		const stored = readStoredConfig(scope, ctx.cwd);
-		const choice = await ctx.ui.select(`${scopeName(scope)} fast-context 高级配置`, [
-			`bootstrapEnabled = ${stored.bootstrapEnabled ?? "default"}`,
-			`bootstrapTreeDepth = ${stored.bootstrapTreeDepth ?? "default"}`,
-			`hotspotTopK = ${stored.hotspotTopK ?? "default"}`,
-			`hotspotTreeDepth = ${stored.hotspotTreeDepth ?? "default"}`,
-			`hotspotMaxBytes = ${stored.hotspotMaxBytes ?? "default"}`,
-			`bootstrapMaxTurns = ${stored.bootstrapMaxTurns ?? "default"}`,
-			`bootstrapMaxCommands = ${stored.bootstrapMaxCommands ?? "default"}`,
-			"返回",
+		const choice = await selectConfigItem(ctx, `${scopeName(scope)} fast-context 高级配置`, [
+			...ADVANCED_CONFIG_FIELDS.map((field) => fieldChoice(field, stored)),
+			{ value: "back", label: "返回", description: "回到上一级配置菜单。", details: "不修改高级配置。" },
 		]);
-		if (!choice || choice === "返回") return;
-		if (choice.startsWith("bootstrapEnabled")) await editBoolean(ctx, scope, "bootstrapEnabled", "设置 bootstrapEnabled");
-		else if (choice.startsWith("bootstrapTreeDepth")) await editNumber(ctx, scope, "bootstrapTreeDepth", "设置 bootstrapTreeDepth", 1, 3);
-		else if (choice.startsWith("hotspotTopK")) await editNumber(ctx, scope, "hotspotTopK", "设置 hotspotTopK", 1, 8);
-		else if (choice.startsWith("hotspotTreeDepth")) await editNumber(ctx, scope, "hotspotTreeDepth", "设置 hotspotTreeDepth", 1, 4);
-		else if (choice.startsWith("hotspotMaxBytes")) await editNumber(ctx, scope, "hotspotMaxBytes", "设置 hotspotMaxBytes", 16384);
-		else if (choice.startsWith("bootstrapMaxTurns")) await editNumber(ctx, scope, "bootstrapMaxTurns", "设置 bootstrapMaxTurns", 1, 5);
-		else if (choice.startsWith("bootstrapMaxCommands")) await editNumber(ctx, scope, "bootstrapMaxCommands", "设置 bootstrapMaxCommands", 1, 12);
+		if (!choice || choice === "back") return;
+		const field = ADVANCED_CONFIG_FIELDS.find((item) => item.key === choice);
+		if (field) await editConfigField(ctx, scope, field);
 	}
 }
 
 async function configureScope(ctx: UiContext, scope: FastContextConfigScope): Promise<void> {
 	while (true) {
 		const stored = readStoredConfig(scope, ctx.cwd);
-		const choice = await ctx.ui.select(`${scopeName(scope)} fast-context 配置`, [
-			`Windsurf API Key = ${maskSecret(stored.apiKey)}`,
-			`Windsurf state.vscdb 路径 = ${stored.dbPath || "auto"}`,
-			`treeDepth = ${stored.treeDepth ?? "default(0)"}`,
-			`maxTurns = ${stored.maxTurns ?? "default(3)"}`,
-			`maxCommands = ${stored.maxCommands ?? "default(8)"}`,
-			`maxResults = ${stored.maxResults ?? "default(10)"}`,
-			`timeoutSecs = ${stored.timeoutSecs ?? "default(30)"}`,
-			`excludePaths = ${stored.excludePaths?.join(", ") || "none"}`,
-			`repoMapMode = ${stored.repoMapMode ?? "default(bootstrap_hotspot)"}`,
-			"Bootstrap / Hotspot 高级设置",
-			"返回",
+		const choice = await selectConfigItem(ctx, `${scopeName(scope)} fast-context 配置`, [
+			{
+				value: "import-key",
+				label: "自动导入 Windsurf API Key",
+				description: "从 Windsurf state.vscdb 读取 key 并保存。",
+				details: "推荐保存到全局配置。此操作只由人工命令触发，key 只会 masked 展示，不进入 LLM 工具结果。",
+			},
+			...BASIC_CONFIG_FIELDS.map((field) => fieldChoice(field, stored)),
+			{
+				value: "advanced",
+				label: "Bootstrap / Hotspot 高级设置",
+				description: "调整 repo map 优化器参数。",
+				details: "通常保持默认即可。只有大仓库性能或结果覆盖不理想时再改。",
+			},
+			{ value: "back", label: "返回", description: "退出当前 scope 配置。", details: "回到上一级菜单。" },
 		]);
-		if (!choice || choice === "返回") return;
-		if (choice.startsWith("Windsurf API Key")) await editString(ctx, scope, "apiKey", "设置 Windsurf API Key", true);
-		else if (choice.startsWith("Windsurf state")) await editString(ctx, scope, "dbPath", "设置 Windsurf state.vscdb 路径");
-		else if (choice.startsWith("treeDepth")) await editNumber(ctx, scope, "treeDepth", "设置 treeDepth（0 = auto）", 0, 6);
-		else if (choice.startsWith("maxTurns")) await editNumber(ctx, scope, "maxTurns", "设置 maxTurns", 1, 10);
-		else if (choice.startsWith("maxCommands")) await editNumber(ctx, scope, "maxCommands", "设置 maxCommands", 1, 20);
-		else if (choice.startsWith("maxResults")) await editNumber(ctx, scope, "maxResults", "设置 maxResults", 1, 50);
-		else if (choice.startsWith("timeoutSecs")) await editNumber(ctx, scope, "timeoutSecs", "设置 timeoutSecs", 1);
-		else if (choice.startsWith("excludePaths")) await editExcludePaths(ctx, scope);
-		else if (choice.startsWith("repoMapMode")) await configureRepoMapMode(ctx, scope);
-		else if (choice.startsWith("Bootstrap")) await configureAdvanced(ctx, scope);
+		if (!choice || choice === "back") return;
+		if (choice === "import-key") await importWindsurfKeyFlow(ctx);
+		else if (choice === "advanced") await configureAdvanced(ctx, scope);
+		else {
+			const field = BASIC_CONFIG_FIELDS.find((item) => item.key === choice);
+			if (field) await editConfigField(ctx, scope, field);
+		}
 	}
 }
 
@@ -391,6 +681,10 @@ async function runConfigWizard(args: string, ctx: UiContext): Promise<void> {
 	const lower = args.trim().toLowerCase();
 	if (lower.includes("clear") || lower.includes("delete") || lower.includes("reset")) {
 		await clearConfigFlow(ctx, args);
+		return;
+	}
+	if (lower.includes("import") || lower.includes("auto") || lower.includes("key")) {
+		await importWindsurfKeyFlow(ctx);
 		return;
 	}
 	const scope = await chooseScope(ctx, args);
@@ -583,9 +877,19 @@ Configuration is handled by /fast-context-config. API key resolution order: FAST
 	});
 
 	pi.registerCommand("fast-context-config", {
-		description: "Configure pi-fast-context interactively. Usage: /fast-context-config [project|global|clear]",
+		description: "Configure pi-fast-context interactively. Usage: /fast-context-config [project|global|clear|import]",
 		handler: async (args, ctx) => {
 			await runConfigWizard(args, ctx as UiContext);
+		},
+	});
+
+	pi.registerCommand("fast-context-import-key", {
+		description: "Import Windsurf API key from local state.vscdb and persist it after confirmation",
+		handler: async (_args, ctx) => {
+			if ((ctx as UiContext).hasUI === false) {
+				throw new Error("/fast-context-import-key 需要交互式 UI。非交互模式请设置 FAST_CONTEXT_API_KEY 或 WINDSURF_API_KEY。");
+			}
+			await importWindsurfKeyFlow(ctx as UiContext);
 		},
 	});
 

@@ -33,10 +33,38 @@ const FIELD_WEIGHTS = {
 
 // Default exclude patterns
 const DEFAULT_EXCLUDES = new Set([
-  "node_modules", ".git", "dist", "build", "coverage", ".venv", "venv",
+  "node_modules", ".git", ".pi", ".ssh", ".gnupg", ".env", "dist", "build", "coverage", ".venv", "venv",
   "target", "out", ".cache", "__pycache__", "vendor", "deps", "third_party",
   "logs", "data", ".next", ".nuxt", "bundle", "bundled", "fixtures",
+  "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
 ]);
+
+const SECRET_FILE_REGEX = /(?:^|[\\/])(?:\.env(?:\..*)?|id_(?:rsa|ed25519|ecdsa|dsa)|.*\.(?:pem|key|p12|pfx|crt|cer))(?:$|[\\/])/i;
+
+function globToRegex(pattern) {
+  let regex = "^";
+  for (const c of pattern.replace(/\\/g, "/")) {
+    if (c === "*") regex += "[^/]*";
+    else if (c === "?") regex += "[^/]";
+    else if (".+^${}()|[]\\".includes(c)) regex += "\\" + c;
+    else regex += c;
+  }
+  regex += "$";
+  return new RegExp(regex, "i");
+}
+
+function makeExcludeMatcher(excludePaths = []) {
+  const patterns = excludePaths.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim().replace(/\\/g, "/"));
+  const regexes = patterns.filter((item) => /[*?]/.test(item)).map(globToRegex);
+  const names = new Set([...DEFAULT_EXCLUDES, ...patterns.filter((item) => !/[*?]/.test(item))]);
+  return (relPath, name = basename(relPath)) => {
+    const normalized = relPath.replace(/\\/g, "/");
+    const parts = normalized.split("/").filter(Boolean);
+    if (parts.some((part) => names.has(part))) return true;
+    if (SECRET_FILE_REGEX.test(`/${normalized}`)) return true;
+    return regexes.some((rx) => rx.test(normalized) || rx.test(name));
+  };
+}
 
 // Stopwords for tokenization
 const STOPWORDS = new Set([
@@ -245,7 +273,7 @@ export function buildDirectoryProfile(projectRoot, dirName, excludePaths = [], m
     file_paths: [], // Store actual file paths for path spines
   };
 
-  const excludeSet = new Set(excludePaths);
+  const isExcluded = makeExcludeMatcher(excludePaths);
 
   function walk(currentPath, depth) {
     if (depth > maxDepth) return;
@@ -254,12 +282,12 @@ export function buildDirectoryProfile(projectRoot, dirName, excludePaths = [], m
       for (const entry of entries) {
         const name = entry.name;
 
-        // Skip excluded and noise
-        if (DEFAULT_EXCLUDES.has(name) || excludeSet.has(name)) continue;
-        if (name.startsWith(".") && name !== ".github") continue;
-
         const fullPath = join(currentPath, name);
         const relPath = relative(projectRoot, fullPath);
+
+        // Skip excluded, secret/config, and noise paths before recording tokens.
+        if (isExcluded(relPath, name)) continue;
+        if (name.startsWith(".") && name !== ".github") continue;
 
         if (entry.isDirectory()) {
           profile.path_tokens.push(relPath);
@@ -393,6 +421,7 @@ function probeGrep(projectRoot, topDirs, probeTerms, excludePaths = []) {
 
   const dirHits = {};
   const excludeSet = new Set([...excludePaths, ...DEFAULT_EXCLUDES]);
+  const isExcluded = makeExcludeMatcher(excludePaths);
 
   for (const dir of topDirs) {
     dirHits[dir] = 0;
@@ -421,6 +450,7 @@ function probeGrep(projectRoot, topDirs, probeTerms, excludePaths = []) {
       const files = result.stdout.trim().split("\n").filter(Boolean);
       for (const file of files) {
         const relPath = relative(projectRoot, file);
+        if (isExcluded(relPath)) continue;
         const topDir = relPath.split(/[\/\\]/)[0];
         if (dirHits.hasOwnProperty(topDir)) {
           dirHits[topDir]++;

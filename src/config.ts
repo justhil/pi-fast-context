@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -221,7 +221,24 @@ export function readMergedStoredConfig(cwd: string): { global: StoredFastContext
 export function writeStoredConfig(scope: FastContextConfigScope, cwd: string, config: StoredFastContextConfig): string {
 	const filePath = getConfigFilePath(scope, cwd);
 	mkdirSync(path.dirname(filePath), { recursive: true });
-	writeFileSync(filePath, `${JSON.stringify(cleanStoredConfig(config), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+	const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		writeFileSync(tmpPath, `${JSON.stringify(cleanStoredConfig(config), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+		try {
+			chmodSync(tmpPath, 0o600);
+		} catch {
+			// Windows may not fully honor POSIX modes; keep the write path working.
+		}
+		renameSync(tmpPath, filePath);
+		try {
+			chmodSync(filePath, 0o600);
+		} catch {
+			// Best effort after rename as well.
+		}
+	} catch (error) {
+		rmSync(tmpPath, { force: true });
+		throw error;
+	}
 	return filePath;
 }
 
@@ -278,23 +295,39 @@ export function validateConfig(config: FastContextConfig): string[] {
 	return issues;
 }
 
-export async function resolveApiKey(config: FastContextConfig): Promise<ResolvedApiKey> {
-	if (config.apiKey) {
-		return { apiKey: config.apiKey, source: config.apiKeySource, dbPath: config.dbPath };
-	}
-
+async function extractWindsurfDbKey(dbPath?: string): Promise<ResolvedApiKey> {
 	try {
 		const core = await import(pathToFileURL(path.join(import.meta.dirname, "lib", "core.mjs")).href) as {
 			extractKeyInfo: (dbPath?: string) => Promise<ExtractKeyResult>;
 		};
-		const result = await core.extractKeyInfo(config.dbPath);
+		const result = await core.extractKeyInfo(dbPath);
 		if (result.api_key) {
 			return { apiKey: result.api_key, source: "windsurf-db", dbPath: result.db_path };
 		}
 		return { source: "none", dbPath: result.db_path, error: result.error, hint: result.hint };
 	} catch (error) {
-		return { source: "none", dbPath: config.dbPath, error: error instanceof Error ? error.message : String(error) };
+		return { source: "none", dbPath, error: error instanceof Error ? error.message : String(error) };
 	}
+}
+
+export function hasEnvApiKey(): boolean {
+	return Boolean(maybeString(process.env.FAST_CONTEXT_API_KEY) ?? maybeString(process.env.WINDSURF_API_KEY));
+}
+
+export async function discoverWindsurfDbKey(dbPath?: string): Promise<ResolvedApiKey> {
+	return extractWindsurfDbKey(dbPath);
+}
+
+export function persistApiKey(scope: FastContextConfigScope, cwd: string, apiKey: string): string {
+	const stored = readStoredConfig(scope, cwd);
+	return writeStoredConfig(scope, cwd, { ...stored, apiKey });
+}
+
+export async function resolveApiKey(config: FastContextConfig): Promise<ResolvedApiKey> {
+	if (config.apiKey) {
+		return { apiKey: config.apiKey, source: config.apiKeySource, dbPath: config.dbPath };
+	}
+	return extractWindsurfDbKey(config.dbPath);
 }
 
 export function maskSecret(value: string | undefined): string {

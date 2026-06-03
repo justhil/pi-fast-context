@@ -6,8 +6,8 @@
  */
 
 import { execFileSync, execFile as execFileCb } from "node:child_process";
-import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
-import { join, resolve, relative, sep, basename } from "node:path";
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync, existsSync } from "node:fs";
+import { join, resolve, relative, isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { rgPath } from "@vscode/ripgrep";
 import treeNodeCli from "tree-node-cli";
@@ -35,6 +35,73 @@ function readIntEnv(name, defaultValue, opts = {}) {
 
 const RESULT_MAX_LINES = readIntEnv("FC_RESULT_MAX_LINES", 50, { min: 1, max: 500 });
 const LINE_MAX_CHARS = readIntEnv("FC_LINE_MAX_CHARS", 250, { min: 20, max: 10000 });
+const SECRET_EXCLUDE_GLOBS = [
+  ".pi",
+  "**/.pi/**",
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  "*.pem",
+  "*.key",
+  "*.p12",
+  "*.pfx",
+  "*.crt",
+  "*.cer",
+  "id_rsa",
+  "id_ed25519",
+  "id_ecdsa",
+  "id_dsa",
+  ".ssh",
+  "**/.ssh/**",
+  ".gnupg",
+  "**/.gnupg/**",
+];
+const SECRET_TREE_EXCLUDES = [/(^|[\\/])\.pi([\\/]|$)/, /(^|[\\/])\.ssh([\\/]|$)/, /(^|[\\/])\.gnupg([\\/]|$)/, /(^|[\\/])\.env(?:\..*)?$/, /.*\.(?:pem|key|p12|pfx|crt|cer)$/i, /(^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)$/i];
+
+function _isSecretRelPath(relPath) {
+  if (!relPath || relPath === ".") return false;
+  const normalized = relPath.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.includes(".pi") || parts.includes(".ssh") || parts.includes(".gnupg")) return true;
+  const base = parts[parts.length - 1] || "";
+  if (base === ".env" || base.startsWith(".env.")) return true;
+  if (/\.(?:pem|key|p12|pfx|crt|cer)$/i.test(base)) return true;
+  if (/^id_(?:rsa|ed25519|ecdsa|dsa)$/i.test(base)) return true;
+  return false;
+}
+
+function _mergeSecretExcludes(exclude) {
+  const merged = [...SECRET_EXCLUDE_GLOBS];
+  for (const item of exclude || []) {
+    if (typeof item === "string" && item && !merged.includes(item)) merged.push(item);
+  }
+  return merged;
+}
+
+function _pathErrorForRoot(root, realRoot, realPath, requested) {
+  const requestedRel = relative(root, realPath);
+  if (requestedRel && (requestedRel.startsWith("..") || isAbsolute(requestedRel))) {
+    return `Error: path outside /codebase is not allowed: ${requested}`;
+  }
+  if (_isSecretRelPath(requestedRel)) {
+    return `Error: access denied for local secret/config path: ${requested}`;
+  }
+
+  try {
+    const resolvedPath = realpathSync(realPath);
+    const resolvedRel = relative(realRoot, resolvedPath);
+    if (resolvedRel && (resolvedRel.startsWith("..") || isAbsolute(resolvedRel))) {
+      return `Error: path outside /codebase is not allowed: ${requested}`;
+    }
+    if (_isSecretRelPath(resolvedRel)) {
+      return `Error: access denied for local secret/config path: ${requested}`;
+    }
+  } catch {
+    // Existence checks happen in callers so missing paths keep the old error text.
+  }
+  return null;
+}
 
 export class ToolExecutor {
   /**
@@ -42,6 +109,7 @@ export class ToolExecutor {
    */
   constructor(projectRoot) {
     this.root = resolve(projectRoot);
+    this.realRoot = realpathSync(this.root);
     /** @type {string[]} */
     this.collectedRgPatterns = [];
   }
@@ -61,6 +129,16 @@ export class ToolExecutor {
       return join(this.root, rel);
     }
     return virtual;
+  }
+
+  /**
+   * Reject paths outside the mounted codebase and local secret/config files.
+   * @param {string} realPath
+   * @param {string} requested
+   * @returns {string|null}
+   */
+  _pathError(realPath, requested) {
+    return _pathErrorForRoot(this.root, this.realRoot, realPath, requested);
   }
 
   /**
@@ -134,6 +212,8 @@ export class ToolExecutor {
     }
     this.collectedRgPatterns.push(pattern);
     const rp = this._real(path);
+    const pathError = this._pathError(rp, path);
+    if (pathError) return pathError;
     if (!existsSync(rp)) {
       return `Error: path does not exist: ${path}`;
     }
@@ -144,10 +224,8 @@ export class ToolExecutor {
         args.push("--glob", g);
       }
     }
-    if (exclude) {
-      for (const g of exclude) {
-        args.push("--glob", `!${g}`);
-      }
+    for (const g of _mergeSecretExcludes(exclude)) {
+      args.push("--glob", `!${g}`);
     }
 
     try {
@@ -186,6 +264,8 @@ export class ToolExecutor {
     }
     this.collectedRgPatterns.push(pattern);
     const rp = this._real(path);
+    const pathError = this._pathError(rp, path);
+    if (pathError) return pathError;
     if (!existsSync(rp)) {
       return `Error: path does not exist: ${path}`;
     }
@@ -196,10 +276,8 @@ export class ToolExecutor {
         args.push("--glob", g);
       }
     }
-    if (exclude) {
-      for (const g of exclude) {
-        args.push("--glob", `!${g}`);
-      }
+    for (const g of _mergeSecretExcludes(exclude)) {
+      args.push("--glob", `!${g}`);
     }
 
     try {
@@ -235,6 +313,8 @@ export class ToolExecutor {
       return "Error: missing or invalid file path";
     }
     const rp = this._real(file);
+    const pathError = this._pathError(rp, file);
+    if (pathError) return pathError;
     try {
       const stat = statSync(rp);
       if (!stat.isFile()) {
@@ -272,6 +352,8 @@ export class ToolExecutor {
       return "Error: missing or invalid path";
     }
     const rp = this._real(path);
+    const pathError = this._pathError(rp, path);
+    if (pathError) return pathError;
     try {
       const stat = statSync(rp);
       if (!stat.isDirectory()) {
@@ -282,7 +364,7 @@ export class ToolExecutor {
     }
 
     try {
-      const opts = {};
+      const opts = { exclude: SECRET_TREE_EXCLUDES };
       if (levels) opts.maxDepth = levels;
       let stdout = treeNodeCli(rp, opts);
       // Two-step normalization:
@@ -316,6 +398,8 @@ export class ToolExecutor {
       return "Error: missing or invalid path";
     }
     const rp = this._real(path);
+    const pathError = this._pathError(rp, path);
+    if (pathError) return pathError;
     try {
       const stat = statSync(rp);
       if (!stat.isDirectory()) {
@@ -332,9 +416,10 @@ export class ToolExecutor {
       return `Error: ${e.message}`;
     }
 
-    if (!allFiles) {
-      entries = entries.filter((e) => !e.startsWith("."));
-    }
+    entries = entries.filter((entry) => {
+      if (!allFiles && entry.startsWith(".")) return false;
+      return !this._pathError(join(rp, entry), `${path.replace(/[\\/]+$/, "")}/${entry}`);
+    });
 
     if (!longFormat) {
       return ToolExecutor._truncate(entries.join("\n"));
@@ -379,18 +464,22 @@ export class ToolExecutor {
       return "Error: missing or invalid path";
     }
     const rp = this._real(path);
+    const pathError = this._pathError(rp, path);
+    if (pathError) return pathError;
 
     // Use recursive readdir + fnmatch since Node 22 globSync may not be available
     const matches = [];
 
     try {
-      _globWalk(rp, pattern, matches, typeFilter);
+      _globWalk(rp, pattern, matches, typeFilter, this.root, this.realRoot);
     } catch {
       // fallback: try simple readdir
       try {
         const entries = readdirSync(rp);
         for (const entry of entries) {
           const fp = join(rp, entry);
+          if (_isSecretRelPath(relative(this.root, fp))) continue;
+          if (this._pathError(fp, entry)) continue;
           if (_fnmatch(entry, pattern)) {
             try {
               const st = statSync(fp);
@@ -555,7 +644,7 @@ function _fnmatch(str, pattern) {
  * @param {string[]} matches
  * @param {string} typeFilter
  */
-function _globWalk(base, pattern, matches, typeFilter) {
+function _globWalk(base, pattern, matches, typeFilter, root = base, realRoot = root) {
   const isRecursive = pattern.includes("**");
 
   const walk = (dir, depth) => {
@@ -573,9 +662,14 @@ function _globWalk(base, pattern, matches, typeFilter) {
       if (matches.length >= 100) return;
       const fp = join(dir, entry);
       const relFromBase = relative(base, fp).replace(/\\/g, "/");
+      const relFromRoot = relative(root, fp).replace(/\\/g, "/");
+      if (_isSecretRelPath(relFromRoot)) continue;
+      if (_pathErrorForRoot(root, realRoot, fp, relFromBase)) continue;
 
+      let linkStat;
       let st;
       try {
+        linkStat = lstatSync(fp);
         st = statSync(fp);
       } catch {
         continue;
@@ -587,7 +681,7 @@ function _globWalk(base, pattern, matches, typeFilter) {
         matches.push(fp);
       }
 
-      if (st.isDirectory() && !entry.startsWith(".") && isRecursive) {
+      if (st.isDirectory() && !linkStat.isSymbolicLink() && !entry.startsWith(".") && isRecursive) {
         walk(fp, depth + 1);
       }
     }

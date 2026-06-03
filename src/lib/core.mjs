@@ -84,15 +84,32 @@ const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 const DEBUG_MODE = process.env.FAST_CONTEXT_DEBUG === "1" || process.env.FAST_CONTEXT_DEBUG === "true";
 
 // Default excludes aligned with Windsurf fast-search guidance.
-// Minimal defaults — only dirs that are almost never source code.
+// Keep local config and secrets out of repo maps and remote-assisted searches.
 // Users can add more via the exclude_paths parameter.
 const DEFAULT_EXCLUDE_PATHS = [
   "node_modules",
   ".git",
+  ".pi",
+  ".env",
+  ".env.*",
+  "*.pem",
+  "*.key",
+  "*.p12",
+  "*.pfx",
+  "*.crt",
+  "*.cer",
+  "id_rsa",
+  "id_ed25519",
+  "id_ecdsa",
+  "id_dsa",
+  ".ssh",
+  ".gnupg",
   "__pycache__",
   ".venv",
   "venv",
   "dist",
+  "build",
+  "coverage",
   "*.min.*",
 ];
 
@@ -180,7 +197,8 @@ instead of \`/codebase\`.
 simple. Use smart case; avoid case-insensitive unless necessary.
 - Prefer file-type filters and globs (in include) over full-repo scans.
 - Default EXCLUDES for speed (apply via the exclude array): \
-node_modules, .git, dist, build, coverage, .venv, venv, target, out, \
+node_modules, .git, .pi, .env, .env.*, *.pem, *.key, *.p12, *.pfx, \
+*.crt, *.cer, id_rsa, id_ed25519, dist, build, coverage, .venv, venv, target, out, \
 .cache, __pycache__, vendor, deps, third_party, logs, data, *.min.*
 - Skip huge files where possible; when opening files, prefer reading \
 only relevant ranges with readfile.
@@ -1131,18 +1149,20 @@ const MAX_TREE_BYTES = 250 * 1024;
  */
 function _excludePatternToRegex(pattern) {
   if (!/[*?]/.test(pattern)) {
-    // Simple name — exact match
-    return new RegExp("^" + pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$");
+    // Simple names should match basename or path segment boundaries because
+    // tree-node-cli may pass either names or full paths to exclude regexes.
+    const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[\\\\/])${escaped}([\\\\/]|$)`);
   }
   // Glob → regex
-  let regex = "^";
+  let regex = "(^|[\\\\/])";
   for (const c of pattern) {
     if (c === "*") regex += ".*";
     else if (c === "?") regex += ".";
     else if (".+^${}()|[]\\".includes(c)) regex += "\\" + c;
     else regex += c;
   }
-  regex += "$";
+  regex += "([\\\\/]|$)";
   return new RegExp(regex);
 }
 
@@ -1283,11 +1303,14 @@ function _listTopLevelDirs(projectRoot, excludePaths = []) {
   return out;
 }
 
-function _buildSubtreeForDir(projectRoot, dir, levels = 2) {
+function _buildSubtreeForDir(projectRoot, dir, levels = 2, excludePaths = []) {
   const abs = join(projectRoot, dir);
   const vRoot = `/codebase/${dir}`;
   try {
-    const stdout = treeNodeCli(abs, { maxDepth: levels });
+    const opts = { maxDepth: levels };
+    const excludeRegexes = excludePaths.length ? excludePaths.map(_excludePatternToRegex) : [];
+    if (excludeRegexes.length) opts.exclude = excludeRegexes;
+    const stdout = treeNodeCli(abs, opts);
     return _normalizeTreeRoot(stdout, abs, vRoot);
   } catch {
     return `${vRoot}\n  (failed to generate subtree)`;
@@ -1360,7 +1383,7 @@ function buildOptimizedRepoMap({
 
   const hotspotSections = [];
   for (const d of hotDirs) {
-    hotspotSections.push(_buildSubtreeForDir(projectRoot, d, hotspotTreeDepth));
+    hotspotSections.push(_buildSubtreeForDir(projectRoot, d, hotspotTreeDepth, excludePaths));
   }
 
   // Build path spines section for deep file visibility

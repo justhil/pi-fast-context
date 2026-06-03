@@ -7,9 +7,9 @@
 ## 能力
 
 - 注册一个 LLM 原生工具：`fast_context_search`
-- 注册人工命令：`/fast-context-config`、`/fast-context-status`、`/fast-context-test`
-- 支持 TUI 配置 Windsurf API Key 和搜索默认参数
-- 支持从 Windsurf 本地 `state.vscdb` 自动提取 API Key
+- 注册人工命令：`/fast-context-config`、`/fast-context-status`、`/fast-context-import-key`、`/fast-context-test`
+- 支持带详情预览的 TUI 配置 Windsurf API Key 和搜索默认参数
+- 支持从 Windsurf 本地 `state.vscdb` 自动提取 API Key，并在确认后持久化保存
 - 支持 Pi tool rendering 和搜索进度更新
 
 Key 解析优先级：
@@ -94,7 +94,13 @@ pi install npm:pi-fast-context
 /fast-context-status
 ```
 
-2. 如果没有自动发现 Windsurf key，运行配置向导：
+2. 如果没有自动发现 Windsurf key，优先自动导入并保存：
+
+```text
+/fast-context-import-key
+```
+
+也可以运行完整配置向导：
 
 ```text
 /fast-context-config
@@ -102,6 +108,7 @@ pi install npm:pi-fast-context
 
 可选择：
 
+- 自动导入 Windsurf API Key（推荐保存全局）
 - 全局配置：`~/.pi/agent/fast-context.json`
 - 项目配置：`.pi/fast-context.json`
 
@@ -128,10 +135,26 @@ fast_context_search
 常用子命令：
 
 ```text
+/fast-context-config import
 /fast-context-config project
 /fast-context-config global
 /fast-context-config clear
 ```
+
+也可以直接运行：
+
+```text
+/fast-context-import-key
+```
+
+导入逻辑：
+
+1. 只在人工 slash command 中执行，不会由 `fast_context_search` 自动触发。
+2. 从 Windsurf 本地 `state.vscdb` 读取 API Key。
+3. 默认推荐保存到全局配置 `~/.pi/agent/fast-context.json`。
+4. 如果选择保存到项目配置 `.pi/fast-context.json`，会二次确认。
+5. 所有 TUI/status/test 输出只展示 masked key；完整 key 不进入 LLM tool result、details 或 system prompt。
+6. 如果当前进程存在 `FAST_CONTEXT_API_KEY` / `WINDSURF_API_KEY`，环境变量仍然拥有最高优先级。
 
 ### 环境变量配置
 
@@ -162,7 +185,7 @@ export WINDSURF_API_KEY="your-windsurf-api-key"
 | 全局 | `~/.pi/agent/fast-context.json` |
 | 项目 | `.pi/fast-context.json` |
 
-配置文件会以 `0600` 权限写入。不要把包含 API Key 的 `.pi/fast-context.json` 提交到 Git。
+配置文件会尽力以 `0600` 权限写入；Windows 上权限语义可能由系统 ACL 决定。不要把包含 API Key 的 `.pi/fast-context.json` 提交到 Git。
 
 ## 工具
 
@@ -195,10 +218,12 @@ export WINDSURF_API_KEY="your-windsurf-api-key"
 
 | 命令 | 说明 |
 |---|---|
-| `/fast-context-config` | 交互式配置 |
+| `/fast-context-config` | 交互式配置，带字段说明和详情预览 |
+| `/fast-context-config import` | 从 Windsurf `state.vscdb` 自动导入并保存 API Key |
 | `/fast-context-config project` | 编辑项目配置 `.pi/fast-context.json` |
 | `/fast-context-config global` | 编辑全局配置 `~/.pi/agent/fast-context.json` |
 | `/fast-context-config clear` | 删除项目或全局配置 |
+| `/fast-context-import-key` | 自动导入 Windsurf API Key 的快捷命令 |
 | `/fast-context-status` | 查看配置、key 来源和默认搜索参数 |
 | `/fast-context-test` | 测试 key，可选运行轻量搜索 |
 
@@ -248,6 +273,9 @@ npm pack --dry-run --json
 
 - Pi packages 会以本机权限执行 extension 代码，安装第三方 package 前应审查源码。
 - `fast_context_search` 不单独暴露 key 检查工具给 LLM；key 只通过人工命令配置和 masked 展示。
+- 自动导入和持久化 key 只发生在 `/fast-context-config import` 或 `/fast-context-import-key` 这类人工命令中，不会由 LLM tool 调用触发。
+- 默认推荐把 key 保存到全局配置；项目配置保存 key 会二次确认。
+- Fast Context 内置默认排除 `.pi/`、`.env*`、常见 key/cert 文件，并在本地 restricted executor 中硬拒读这些 secret/config 路径。
 - 不要提交 `.pi/fast-context.json`、`.env`、Windsurf API Key 或任何包含 secret 的日志。
 
 ## 注意
