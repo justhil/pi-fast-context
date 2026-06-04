@@ -722,23 +722,9 @@ async function getCachedJwt(apiKey) {
   return token;
 }
 
-// ─── TLS Fallback ──────────────────────────────────────────
-// Match Python's SSL fallback: if NODE_TLS_REJECT_UNAUTHORIZED is not set
-// and the first fetch fails with a TLS error, disable cert verification.
-let _tlsFallbackApplied = false;
-
-function _applyTlsFallback() {
-  if (!_tlsFallbackApplied && !process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-    _tlsFallbackApplied = true;
-    process.stderr.write(
-      "[fast-context] WARNING: TLS certificate verification disabled due to connection failure. " +
-      "Set NODE_TLS_REJECT_UNAUTHORIZED=0 explicitly to suppress this warning.\n"
-    );
-  }
-}
-
 // ─── Network Layer ─────────────────────────────────────────
+// Do not disable TLS verification implicitly. If a user deliberately wants
+// insecure TLS, Node already honors an explicit NODE_TLS_REJECT_UNAUTHORIZED=0.
 
 /**
  * Standard unary HTTP POST with proto content type.
@@ -774,13 +760,7 @@ async function _unaryRequest(url, protoBytes, compress = true) {
   try {
     resp = await doFetch();
   } catch (e) {
-    // TLS or network error — try with cert verification disabled
-    _applyTlsFallback();
-    try {
-      resp = await doFetch();
-    } catch (e2) {
-      throw _classifyError(e2);
-    }
+    throw _classifyError(e);
   }
 
   if (!resp.ok) {
@@ -833,17 +813,7 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) 
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      let resp;
-      try {
-        resp = await doFetch();
-      } catch (e) {
-        if (attempt === 0) {
-          _applyTlsFallback();
-          resp = await doFetch();
-        } else {
-          throw e;
-        }
-      }
+      const resp = await doFetch();
 
       if (!resp.ok) {
         const err = new Error(`HTTP ${resp.status}`);
