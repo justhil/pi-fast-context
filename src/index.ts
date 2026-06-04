@@ -699,36 +699,46 @@ async function runConfigWizard(args: string, ctx: UiContext): Promise<void> {
 	if (scope) await configureScope(ctx, scope);
 }
 
-function buildSystemPrompt(cwd: string, options: Pick<BuildSystemPromptOptions, "selectedTools">): string {
+function hasSelectedTool(selectedTools: unknown, name: string): boolean {
+	if (!Array.isArray(selectedTools)) return true;
+	return selectedTools.some((tool) => {
+		if (typeof tool === "string") return tool === name;
+		if (tool && typeof tool === "object" && "name" in tool) return (tool as { name?: unknown }).name === name;
+		return false;
+	});
+}
+
+function buildFastContextSystemPrompt(cwd: string, options: Pick<BuildSystemPromptOptions, "selectedTools">): string {
+	if (!hasSelectedTool(options.selectedTools, "fast_context_search")) return "";
+
 	const config = loadConfig(cwd);
 	const issues = validateConfig(config);
 	if (issues.length > 0) {
 		return "Fast Context unavailable: do not call fast_context_search until configuration issues are fixed with /fast-context-status or /fast-context-config.";
 	}
 
-	const selectedTools = new Set(options.selectedTools ?? []);
-	const hasSelection = Boolean(options.selectedTools);
-	const hasTool = (name: string) => !hasSelection || selectedTools.has(name);
-	if (!hasTool("fast_context_search")) return "";
-
 	return [
 		"## Fast Context routing",
-		"fast_context_search is a native Pi semantic codebase discovery tool backed by Windsurf Devstral.",
-		"Use it early when relevant files, implementation flows, architecture, behavior, or tests are unknown.",
-		"Do not use it for exact identifier grep, exhaustive reference lists, directory listing, reading known files, or editing files.",
-		"Treat returned files and line ranges as navigation hints; read the files with normal Pi tools before making changes or claims.",
-		"Search query format: concise natural language plus optional exact keywords.",
+		"fast_context_search is semantic codebase discovery for project-specific implementation context. Use it early when target files or flows are unknown.",
+		"",
+		"Call fast_context_search when:",
+		"- relevant files, components, implementation flows, architecture, behavior, or tests are unknown;",
+		"- a natural-language coding task needs project-specific context before planning or editing;",
+		"- grep/find would be too broad, or reliable exact keywords are unclear.",
+		"",
+		"Do not call fast_context_search when:",
+		"- exact file paths or exact symbols are already known and read or literal search is enough;",
+		"- you need exhaustive references, directory listing, file contents, or file modifications;",
+		"- fast_context_search already returned candidate files and the next step is verification, reading, or editing.",
+		"",
+		"After results: treat file paths, line ranges, and grep keywords as navigation hints. Read candidate files with normal tools before claims or changes.",
+		"Keep using read for known paths, bash/rg/grep/find/ls for exact or exhaustive search, and edit/write for changes.",
+		"Query format: concise natural language plus optional exact keywords. Set project_root_path only when searching outside the current project.",
 	].join("\n");
 }
 
 function hasFastContextTool(event: { systemPromptOptions?: { selectedTools?: unknown } }): boolean {
-	const selectedTools = event.systemPromptOptions?.selectedTools;
-	if (!Array.isArray(selectedTools)) return true;
-	return selectedTools.some((tool) => {
-		if (typeof tool === "string") return tool === "fast_context_search";
-		if (tool && typeof tool === "object" && "name" in tool) return (tool as { name?: unknown }).name === "fast_context_search";
-		return false;
-	});
+	return hasSelectedTool(event.systemPromptOptions?.selectedTools, "fast_context_search");
 }
 
 async function loadCore(): Promise<CoreModule> {
@@ -746,16 +756,16 @@ export default function piFastContextExtension(pi: ExtensionAPI) {
 		label: "Fast Context",
 		description: `Native Pi semantic codebase discovery powered by Windsurf Devstral Fast Context.
 
-Use fast_context_search early when relevant files, components, implementation flows, architecture, behavior, or tests are unknown, especially before non-trivial code changes driven by natural-language requirements.
+Use fast_context_search early when relevant files, components, implementation flows, architecture, behavior, or tests are unknown, especially before planning or editing natural-language coding tasks that need project-specific context.
 
 Do NOT use it for exact identifier grep, exhaustive reference lists, literal text search, directory listing, reading a known file, or modifying files. Use bash/rg/grep/find/ls/read/edit/write for those jobs when available.
 
-Configuration is handled by /fast-context-config. API key resolution order: FAST_CONTEXT_API_KEY or WINDSURF_API_KEY env > project config > global config > Windsurf state.vscdb auto-discovery.`,
-		promptSnippet: "Semantic natural-language codebase discovery using Windsurf Devstral; returns relevant files, line ranges, and grep keywords.",
+Treat results as navigation hints: read returned files before precise claims or changes. Configuration is handled by /fast-context-config. API key resolution order: FAST_CONTEXT_API_KEY or WINDSURF_API_KEY env > project config > global config > Windsurf state.vscdb auto-discovery.`,
+		promptSnippet: "Semantic codebase discovery for unknown files, flows, architecture, tests, and project-specific implementation context; returns file paths, line ranges, and grep keywords.",
 		promptGuidelines: [
-			"Use fast_context_search early when project-specific implementation files or flows are unknown.",
-			"Do not use it for exact identifiers, literal text search, directory listings, known file reads, or edits.",
-			"After fast_context_search returns candidate files, read those files with normal tools before editing or making claims.",
+			"Use fast_context_search early only when the task needs project-specific context and relevant files, flows, architecture, behavior, or tests are unknown.",
+			"Do not use fast_context_search for exact identifiers, literal text search, directory listings, known file reads, or edits; use bash/rg/grep/find/ls/read/edit/write for those.",
+			"After fast_context_search returns candidate files, read them with normal tools first; only search again if verification shows the candidates are insufficient.",
 		],
 		parameters: SEARCH_PARAMS,
 		prepareArguments(args): SearchParams {
@@ -909,7 +919,7 @@ Configuration is handled by /fast-context-config. API key resolution order: FAST
 
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!hasFastContextTool(event)) return;
-		const prompt = buildSystemPrompt(ctx.cwd, event.systemPromptOptions);
+		const prompt = buildFastContextSystemPrompt(ctx.cwd, event.systemPromptOptions);
 		if (!prompt) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
 	});
